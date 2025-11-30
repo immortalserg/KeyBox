@@ -12,6 +12,7 @@ C_SRCS += \
 ../User/keyfob.c \
 ../User/led.c \
 ../User/main.c \
+../User/monocypher.c \
 ../User/rng.c \
 ../User/rs485.c \
 ../User/rtc.c \
@@ -25,6 +26,7 @@ C_DEPS += \
 ./User/keyfob.d \
 ./User/led.d \
 ./User/main.d \
+./User/monocypher.d \
 ./User/rng.d \
 ./User/rs485.d \
 ./User/rtc.d \
@@ -38,6 +40,7 @@ OBJS += \
 ./User/keyfob.o \
 ./User/led.o \
 ./User/main.o \
+./User/monocypher.o \
 ./User/rng.o \
 ./User/rs485.o \
 ./User/rtc.o \
