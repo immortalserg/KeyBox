@@ -26,7 +26,6 @@
 #include "cfg.h"
 #include "rs485.h"
 
-#include "crypto_x25519.h"
 
 #define APP_VER 0x01
 
@@ -76,7 +75,6 @@ uint8_t app_nonce_active = 0;
 #define APP_ERR_USER_BLOCKED           10
 #define APP_ERR_USER_NAME_INVALID      11
 #define APP_ERR_NONCE_CHECK_FAILED     12 // ----- 抉扮我忌抗忘 扭把抉志快把抗我 nonce
-#define APP_ERR_DECRYPT_FAIL           13 // --+-- 抉扮我忌抗忘 忱快扮我扳把忘扯我我
 
 #define APP_CMD_HELLO          0
 #define APP_CMD_ADD_FIRST_USER 1
@@ -198,18 +196,6 @@ void app_generate_nonce(void) {
 
 uint32_t app_in_logic() {
     memcpy(&app_in, app_raw, sizeof(struct app_req));
-// --+--
-uint8_t decrypted[256];
-uint8_t shared[32];
-crypto_x25519_shared(shared,
-                     app_dev_info.private_key,     // Ed25519 private
-                     app_user_info.public_key);    // Ed25519 public from user
-
-if (crypto_decrypt(decrypted, app_raw, encrypted_len, shared) != 0)
-    return APP_ERR_DECRYPT_FAIL;
-memcpy(&app_in, decrypted, sizeof(app_in));
-// --+--
-
 
     dbg_printf("*** req ***\n");
     dbg_printf(" ver: %u\n", app_in.ver);
@@ -452,25 +438,12 @@ memcpy(&app_in, decrypted, sizeof(app_in));
 }
 
 void app_out_reply() {
-// --+--
-uint8_t shared[32];
-uint8_t encrypted[256];
 
-crypto_x25519_shared(shared,
-                     app_dev_info.private_key,     // KeyBox private
-                     app_user_info.public_key);    // user public
+    ed25519_sign(app_out.signature, (uint8_t *)&app_out, sizeof(struct app_reply) - 64, app_dev_info.public_key, app_dev_info.private_key);
+    memcpy(app_raw, &app_out, sizeof(struct app_reply));
 
-ed25519_sign(app_out.signature, (uint8_t *)&app_out, sizeof(app_out) - 64,
-             app_dev_info.public_key, app_dev_info.private_key);
+    ble_data_send(app_raw, sizeof(struct app_reply));
 
-int enc_len = crypto_encrypt(encrypted, (uint8_t*)&app_out, sizeof(app_out), shared);
-
-ble_data_send(encrypted, enc_len);
-//    ed25519_sign(app_out.signature, (uint8_t *)&app_out, sizeof(struct app_reply) - 64, app_dev_info.public_key, app_dev_info.private_key);
-//    memcpy(app_raw, &app_out, sizeof(struct app_reply));
-//
-//    ble_data_send(app_raw, sizeof(struct app_reply));
-// --+--
     dbg_printf("*** reply ***\n");
     dbg_printf(" ver: %u\n", app_out.ver);
 	dbg_printf(" tim: %d dt: %d\n", app_out.time, app_in.time - app_out.time);
