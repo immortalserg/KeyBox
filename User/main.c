@@ -26,7 +26,6 @@
 #include "cfg.h"
 #include "rs485.h"
 
-
 #define APP_VER 0x01
 
 struct __attribute__((packed)) app_req {
@@ -437,6 +436,8 @@ uint32_t app_in_logic() {
     }
 }
 
+
+
 void app_out_reply() {
 
     ed25519_sign(app_out.signature, (uint8_t *)&app_out, sizeof(struct app_reply) - 64, app_dev_info.public_key, app_dev_info.private_key);
@@ -571,6 +572,7 @@ void app_task() {
 
     while (1) {
         // Check if ble message awailable
+
         if (xQueueReceive(ble_data_recv, &app_raw, 100) == pdPASS) {
             app_in_logic();
             app_out_reply();

@@ -44,7 +44,7 @@ User/main.o: ../User/main.c \
  /home/immortal/Загрузки/keybox-firmware-main/code/mcu-app/User/ed25519/ed25519.h \
  ../User/led.h ../User/keyfob.h ../User/button.h ../User/ble.h \
  ../User/cfg.h ../User/rtc.h ../User/flash.h ../User/rng.h \
- ../User/rs485.h ../User/crypto_x25519.h
+ ../User/rs485.h
 
 /home/immortal/Загрузки/keybox-firmware-main/code/mcu-app/Debug/debug.h:
 
@@ -149,5 +149,3 @@ User/main.o: ../User/main.c \
 ../User/rng.h:
 
 ../User/rs485.h:
-
-../User/crypto_x25519.h:
