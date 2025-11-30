@@ -25,6 +25,7 @@
 #include "rng.h"
 #include "cfg.h"
 #include "rs485.h"
+#include "monocypher.h"
 
 #define APP_VER 0x01
 

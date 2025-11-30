@@ -1,0 +1,418 @@
+diff --git a/User/main.c b/User/main.c
+index 0000000..1111111 100644
+--- a/User/main.c
++++ b/User/main.c
+@@ -1,57 +1,354 @@
+-#include <stdint.h>
+-#include <string.h>
+-#include "monocypher.h"
+-
+-// === Параметры крипто ===
+-#define KX_PRIV_SIZE   32
+-#define KX_PUB_SIZE    32
+-#define SESSION_KEY_SIZE 32
+-#define AEAD_NONCE_SIZE 24
+-
+-static uint8_t kb_priv[KX_PRIV_SIZE];
+-static uint8_t kb_pub[KX_PUB_SIZE];
+-static uint8_t session_key[SESSION_KEY_SIZE];
+-static uint8_t session_nonce[AEAD_NONCE_SIZE];
+-
+-// Генерация (или загрузка) ключей — вызвать при старте
+-static void crypto_init_keys(void) {
+-    // TODO: при первом старте — генерировать, иначе — загружать из NVM/flash
+-    crypto_random(kb_priv, KX_PRIV_SIZE);
+-    crypto_x25519_public_key(kb_pub, kb_priv);
+-}
+-
+-// Начало сессии — принимаем публичный ключ peer, генерим nonce + session_key
+-static void crypto_session_start(const uint8_t peer_pub[KX_PUB_SIZE]) {
+-    crypto_x25519(session_key, kb_priv, peer_pub);
+-    // Для простоты — хэшируем shared → ключ сеанса
+-    crypto_blake2b(session_key, SESSION_KEY_SIZE,
+-                   session_key, KX_PRIV_SIZE);
+-    // nonce
+-    crypto_random(session_nonce, AEAD_NONCE_SIZE);
+-}
+-
+-// Шифрование + MAC (AEAD) для ответа
+-// plaintext_len <= out_buf_len - 16
+-static size_t crypto_encrypt_reply(const uint8_t *plaintext, size_t plaintext_len,
+-                                   uint8_t *out_buf) {
+-    uint8_t *cipher = out_buf;
+-    uint8_t *mac    = out_buf + plaintext_len;
+-    crypto_lock_aead(mac, cipher,
+-                     session_key, session_nonce,
+-                     NULL, 0,
+-                     plaintext, plaintext_len);
+-    return plaintext_len + 16;
+-}
+-
+-// Дешифровка запроса: ciphertext + mac → plaintext
+-// in_len = cipher_len + 16 (mac)
+-// out_buf должен быть ≥ cipher_len
+-static int crypto_decrypt_request(const uint8_t *in_buf, size_t in_len,
+-                                  uint8_t *out_buf) {
+-    if (in_len < 16) return -1;
+-    size_t cipher_len = in_len - 16;
+-    const uint8_t *cipher = in_buf;
+-    const uint8_t *mac    = in_buf + cipher_len;
+-    if (crypto_unlock_aead(out_buf,
+-                           session_key, session_nonce,
+-                           NULL, 0,
+-                           cipher, cipher_len,
+-                           mac) != 0) {
+-        return -1;
+-    }
+-    return (int)cipher_len;
+-}
+-
++/* === Crypto + persistent storage integration (Monocypher) ===
++ *
++ * Что добавлено:
++ *  - сохранение/загрузка приватного X25519 ключа kb_priv в NVM (флеш),
++ *    ключ шифруется root_key = BLAKE2b(device_UID || constant).
++ *  - сохранение публичного ключа peer (peer_pub) в RAM + flash slot.
++ *  - управление nonce (инкремент / регенерация).
++ *  - проверки границ буферов и коды ошибок.
++ *
++ * Обязательная интеграция (нужно реализовать для CH32V307):
++ *  - platform_flash_read(slot, buf, len)
++ *  - platform_flash_write(slot, buf, len)
++ *  - platform_flash_erase(slot)
++ *  - platform_get_device_uid(uid, uid_len)
++ *  - platform_hw_random(buf, len)
++ *
++ * Эти платформенные функции описаны ниже и помечены TODO.
++ */
++
++#include <stdint.h>
++#include <stddef.h>
++#include <string.h>
++#include <stdbool.h>
++#include "monocypher.h"
++
++// ---------------- constants ----------------
++#define KX_PRIV_SIZE        32
++#define KX_PUB_SIZE         32
++#define SESSION_KEY_SIZE    32
++#define AEAD_NONCE_SIZE     24
++#define AEAD_MAC_SIZE       16
++
++// Storage slots (логические) — платформозависимо: platform_* примет slot номер
++#define FLASH_SLOT_KB_PRIV  0   // slot для приватного ключа KeyBox
++#define FLASH_SLOT_PEER_PUB 1   // slot для публичного ключа партнёра
++
++// Storage layout magic/version
++static const uint32_t STORAGE_MAGIC = 0x4B425354; // "KBST"
++static const uint8_t  STORAGE_VERSION = 1;
++
++// ---------------- RAM state ----------------
++static uint8_t kb_priv[KX_PRIV_SIZE];   // X25519 private (долговременный)
++static uint8_t kb_pub[KX_PUB_SIZE];     // X25519 public (долговременный)
++static bool kb_priv_loaded = false;
++
++static uint8_t peer_pub[KX_PUB_SIZE];   // публичный ключ peer (в RAM)
++static bool peer_pub_present = false;
++
++static uint8_t session_key[SESSION_KEY_SIZE];
++static uint8_t session_nonce[AEAD_NONCE_SIZE];
++
++// ---------------- platform hooks (IMPLEMENT ON CH32V307) ----------------
++// Реализуй эти функции под свою платформу:
++// platform_flash_read: читает len байт из слота (slot — логический номер)
++//   вернуть 0 при успехе, !=0 при ошибке.
++// platform_flash_write: записать len байт в слот (будет удалять сектор/страницу внутри)
++// platform_flash_erase: стереть слот (примерно — стереть сектор)
++// platform_get_device_uid(uid, uid_len): получить уникальный ID чипа
++// platform_hw_random(buf, len): получить крипто-стойкие случайные байты
++//
++// Ниже — прототипы; конкретную реализацию добавь в файле bsp / hal для CH32V307.
++int platform_flash_read(uint8_t slot, uint8_t *buf, size_t len);
++int platform_flash_write(uint8_t slot, const uint8_t *buf, size_t len);
++int platform_flash_erase(uint8_t slot);
++int platform_get_device_uid(uint8_t *uid, size_t uid_len);
++int platform_hw_random(uint8_t *buf, size_t len);
++
++/* Пример stub-реализаций (для СИМУЛЯЦИИ) — ЗАМЕНИ на реальные вызовы HAL:
++ *
++ * int platform_flash_read(uint8_t slot, uint8_t *buf, size_t len) { ... }
++ * int platform_flash_write(uint8_t slot, const uint8_t *buf, size_t len) { ... }
++ * int platform_flash_erase(uint8_t slot) { ... }
++ * int platform_get_device_uid(uint8_t *uid, size_t uid_len) { ... }
++ * int platform_hw_random(uint8_t *buf, size_t len) { ... }
++ *
++ * В репозитории положи реализацию в bsp/ch32v307_flash.c / rng.c
++ */
++
++// ---------------- helpers ----------------
++static void wipe_buf(void *p, size_t n) { if (p && n) crypto_wipe(p, n); }
++
++// derive root key from device UID and constant salt:
++// root_key = BLAKE2b(uid || salt) truncated to 32 bytes
++static int derive_root_key(uint8_t root_key[SESSION_KEY_SIZE]) {
++    uint8_t uid[32];
++    if (platform_get_device_uid(uid, sizeof(uid)) != 0) return -1;
++    const uint8_t salt[] = "KeyBox:StorageRoot:v1";
++    uint8_t tmp[sizeof(uid) + sizeof(salt)];
++    memcpy(tmp, uid, sizeof(uid));
++    memcpy(tmp + sizeof(uid), salt, sizeof(salt));
++    crypto_blake2b(root_key, SESSION_KEY_SIZE, tmp, sizeof(tmp));
++    wipe_buf(tmp, sizeof(tmp));
++    wipe_buf(uid, sizeof(uid));
++    return 0;
++}
++
++// derive per-slot encryption key: K_slot = BLAKE2b(root_key || slot_id)
++static void derive_slot_key(const uint8_t root_key[SESSION_KEY_SIZE],
++                            uint8_t slot, uint8_t slot_key[SESSION_KEY_SIZE]) {
++    uint8_t tmp[SESSION_KEY_SIZE + 1];
++    memcpy(tmp, root_key, SESSION_KEY_SIZE);
++    tmp[SESSION_KEY_SIZE] = slot;
++    crypto_blake2b(slot_key, SESSION_KEY_SIZE, tmp, sizeof(tmp));
++    wipe_buf(tmp, sizeof(tmp));
++}
++
++// ---------------- storage format ----------------
++// Stored blob layout (per slot):
++// [magic:4][version:1][nonce:24][ciphertext_len:2][ciphertext (cipher_len bytes)][mac:16]
++// magic/version for basic sanity check
++// NOTE: platform_flash_read/write must handle addressing/erase specifics
++
++// Max ciphertext we support for key blobs (we store only small blobs: 32 bytes)
++#define STORAGE_MAX_PAYLOAD 128
++
++// ---------------- store/load functions ----------------
++// store encrypted kb_priv into FLASH_SLOT_KB_PRIV
++// returns 0 on success, nonzero on error
++static int store_kb_priv_to_flash(void) {
++    uint8_t root[SESSION_KEY_SIZE];
++    if (derive_root_key(root) != 0) return -1;
++
++    uint8_t slot_key[SESSION_KEY_SIZE];
++    derive_slot_key(root, (uint8_t)FLASH_SLOT_KB_PRIV, slot_key);
++
++    uint8_t nonce[AEAD_NONCE_SIZE];
++    if (platform_hw_random(nonce, AEAD_NONCE_SIZE) != 0) { wipe_buf(root, sizeof(root)); wipe_buf(slot_key, sizeof(slot_key)); return -2; }
++
++    uint8_t ciphertext[STORAGE_MAX_PAYLOAD];
++    // encrypt kb_priv (32 bytes) => ciphertext (same length)
++    crypto_aead_lock(ciphertext, NULL, slot_key, nonce, NULL, 0, kb_priv, KX_PRIV_SIZE);
++    // Note: Monocypher's crypto_aead_lock can output MAC separately; to simplify we will call crypto_lock_aead to get mac and cipher:
++    uint8_t mac[AEAD_MAC_SIZE];
++    crypto_lock_aead(mac, ciphertext, slot_key, nonce, NULL, 0, kb_priv, KX_PRIV_SIZE);
++
++    // build store buffer
++    uint8_t store_buf[4 + 1 + AEAD_NONCE_SIZE + 2 + KX_PRIV_SIZE + AEAD_MAC_SIZE];
++    size_t pos = 0;
++    // magic
++    store_buf[pos++] = (uint8_t)(STORAGE_MAGIC >> 24);
++    store_buf[pos++] = (uint8_t)(STORAGE_MAGIC >> 16);
++    store_buf[pos++] = (uint8_t)(STORAGE_MAGIC >> 8);
++    store_buf[pos++] = (uint8_t)(STORAGE_MAGIC);
++    // version
++    store_buf[pos++] = STORAGE_VERSION;
++    // nonce
++    memcpy(store_buf + pos, nonce, AEAD_NONCE_SIZE); pos += AEAD_NONCE_SIZE;
++    // ciphertext_len (big-endian 2 bytes)
++    store_buf[pos++] = (uint8_t)((KX_PRIV_SIZE >> 8) & 0xFF);
++    store_buf[pos++] = (uint8_t)(KX_PRIV_SIZE & 0xFF);
++    // ciphertext
++    memcpy(store_buf + pos, ciphertext, KX_PRIV_SIZE); pos += KX_PRIV_SIZE;
++    // mac
++    memcpy(store_buf + pos, mac, AEAD_MAC_SIZE); pos += AEAD_MAC_SIZE;
++
++    // write to flash (erase handled by platform if needed)
++    int rc = platform_flash_erase(FLASH_SLOT_KB_PRIV);
++    if (rc != 0) { wipe_buf(root, sizeof(root)); wipe_buf(slot_key, sizeof(slot_key)); return -3; }
++    rc = platform_flash_write(FLASH_SLOT_KB_PRIV, store_buf, pos);
++
++    // cleanup
++    wipe_buf(root, sizeof(root));
++    wipe_buf(slot_key, sizeof(slot_key));
++    wipe_buf(nonce, sizeof(nonce));
++    wipe_buf(ciphertext, sizeof(ciphertext));
++    wipe_buf(mac, sizeof(mac));
++    wipe_buf(store_buf, sizeof(store_buf));
++    return rc;
++}
++
++// load kb_priv from flash slot — decrypts into kb_priv, sets kb_priv_loaded true on success
++// return 0 on success, nonzero on error
++static int load_kb_priv_from_flash(void) {
++    // read header sized data up to expected
++    uint8_t read_buf[4 + 1 + AEAD_NONCE_SIZE + 2 + KX_PRIV_SIZE + AEAD_MAC_SIZE];
++    size_t expect_len = sizeof(read_buf);
++    if (platform_flash_read(FLASH_SLOT_KB_PRIV, read_buf, expect_len) != 0) return -1;
++
++    size_t pos = 0;
++    uint32_t magic = ((uint32_t)read_buf[pos] << 24) | ((uint32_t)read_buf[pos+1] << 16) | ((uint32_t)read_buf[pos+2] << 8) | ((uint32_t)read_buf[pos+3]);
++    pos += 4;
++    if (magic != STORAGE_MAGIC) return -2;
++    uint8_t version = read_buf[pos++]; (void)version; // currently unused
++    uint8_t nonce[AEAD_NONCE_SIZE];
++    memcpy(nonce, read_buf + pos, AEAD_NONCE_SIZE); pos += AEAD_NONCE_SIZE;
++    uint16_t cipher_len = ((uint16_t)read_buf[pos] << 8) | (uint16_t)read_buf[pos+1]; pos += 2;
++    if (cipher_len != KX_PRIV_SIZE) return -3;
++    const uint8_t *ciphertext = read_buf + pos; pos += cipher_len;
++    const uint8_t *mac = read_buf + pos; pos += AEAD_MAC_SIZE;
++
++    uint8_t root[SESSION_KEY_SIZE];
++    if (derive_root_key(root) != 0) return -4;
++    uint8_t slot_key[SESSION_KEY_SIZE];
++    derive_slot_key(root, (uint8_t)FLASH_SLOT_KB_PRIV, slot_key);
++
++    // decrypt
++    if (crypto_unlock_aead(kb_priv, slot_key, nonce, NULL, 0, ciphertext, cipher_len, mac) != 0) {
++        wipe_buf(root, sizeof(root));
++        wipe_buf(slot_key, sizeof(slot_key));
++        return -5; // MAC/Decrypt fail
++    }
++
++    // compute public key from private
++    crypto_x25519_public_key(kb_pub, kb_priv);
++    kb_priv_loaded = true;
++
++    wipe_buf(root, sizeof(root));
++    wipe_buf(slot_key, sizeof(slot_key));
++    wipe_buf(nonce, sizeof(nonce));
++    wipe_buf(read_buf, sizeof(read_buf));
++    return 0;
++}
++
++// store peer_pub to flash (unencrypted, for simplicity) — small helper
++static int store_peer_pub_to_flash(const uint8_t peer[KX_PUB_SIZE]) {
++    // Format: magic(4) + version(1) + pub(32)
++    uint8_t buf[4 + 1 + KX_PUB_SIZE];
++    size_t pos = 0;
++    buf[pos++] = (uint8_t)(STORAGE_MAGIC >> 24);
++    buf[pos++] = (uint8_t)(STORAGE_MAGIC >> 16);
++    buf[pos++] = (uint8_t)(STORAGE_MAGIC >> 8);
++    buf[pos++] = (uint8_t)(STORAGE_MAGIC);
++    buf[pos++] = STORAGE_VERSION;
++    memcpy(buf + pos, peer, KX_PUB_SIZE); pos += KX_PUB_SIZE;
++    if (platform_flash_erase(FLASH_SLOT_PEER_PUB) != 0) return -1;
++    return platform_flash_write(FLASH_SLOT_PEER_PUB, buf, pos);
++}
++
++static int load_peer_pub_from_flash(void) {
++    uint8_t buf[4 + 1 + KX_PUB_SIZE];
++    if (platform_flash_read(FLASH_SLOT_PEER_PUB, buf, sizeof(buf)) != 0) return -1;
++    size_t pos = 0;
++    uint32_t magic = ((uint32_t)buf[pos] << 24) | ((uint32_t)buf[pos+1] << 16) | ((uint32_t)buf[pos+2] << 8) | ((uint32_t)buf[pos+3]);
++    pos += 4;
++    if (magic != STORAGE_MAGIC) return -2;
++    uint8_t version = buf[pos++]; (void)version;
++    memcpy(peer_pub, buf + pos, KX_PUB_SIZE);
++    peer_pub_present = true;
++    // no sensitive data here (peer pub)
++    return 0;
++}
++
++// set peer public key (called on provisioning/handshake receive)
++static int set_peer_pub(const uint8_t pub[KX_PUB_SIZE]) {
++    if (!pub) return -1;
++    memcpy(peer_pub, pub, KX_PUB_SIZE);
++    peer_pub_present = true;
++    // persist
++    return store_peer_pub_to_flash(pub);
++}
++
++// ---------------- session / nonce management ----------------
++// start session: compute session_key from kb_priv and peer_pub; generate fresh nonce
++static int session_start_with_peer(void) {
++    if (!kb_priv_loaded || !peer_pub_present) return -1;
++    crypto_x25519(session_key, kb_priv, peer_pub);
++    // derive final session key using blake2b(shared || kb_pub || peer_pub)
++    uint8_t tmp[SESSION_KEY_SIZE + KX_PUB_SIZE + KX_PUB_SIZE];
++    memcpy(tmp, session_key, SESSION_KEY_SIZE);
++    memcpy(tmp + SESSION_KEY_SIZE, kb_pub, KX_PUB_SIZE);
++    memcpy(tmp + SESSION_KEY_SIZE + KX_PUB_SIZE, peer_pub, KX_PUB_SIZE);
++    crypto_blake2b(session_key, SESSION_KEY_SIZE, tmp, sizeof(tmp));
++    wipe_buf(tmp, sizeof(tmp));
++    // nonce random
++    if (platform_hw_random(session_nonce, AEAD_NONCE_SIZE) != 0) {
++        // fallback: set nonce = hash(session_key) -- less ideal
++        crypto_blake2b(session_nonce, AEAD_NONCE_SIZE, session_key, SESSION_KEY_SIZE);
++    }
++    return 0;
++}
++
++// increment nonce (24 bytes little-endian)
++static void nonce_increment(uint8_t nonce[AEAD_NONCE_SIZE]) {
++    for (int i = AEAD_NONCE_SIZE - 1; i >= 0; --i) {
++        if (++nonce[i] != 0) break;
++    }
++}
++
++// Regenerate nonce (random)
++static void nonce_regenerate(uint8_t nonce[AEAD_NONCE_SIZE]) {
++    if (platform_hw_random(nonce, AEAD_NONCE_SIZE) != 0) {
++        crypto_blake2b(nonce, AEAD_NONCE_SIZE, session_key, SESSION_KEY_SIZE);
++    }
++}
++
++// ---------------- AEAD helpers with bounds checks ----------------
++// Encrypt reply into out_buf. out_buf_len must be >= plaintext_len + AEAD_MAC_SIZE.
++// Returns total length (cipher_len + mac) or negative on error.
++static int encrypt_reply_checked(const uint8_t *plaintext, size_t plaintext_len,
++                                 uint8_t *out_buf, size_t out_buf_len) {
++    if (!plaintext || !out_buf) return -1;
++    if (plaintext_len + AEAD_MAC_SIZE > out_buf_len) return -2;
++    if (!kb_priv_loaded || !peer_pub_present) return -3;
++    // use crypto_lock_aead which writes MAC first param and ciphertext second param
++    uint8_t mac[AEAD_MAC_SIZE];
++    crypto_lock_aead(mac, out_buf, session_key, session_nonce, NULL, 0, plaintext, plaintext_len);
++    // append mac after ciphertext (so output layout: [ciphertext][mac])
++    memcpy(out_buf + plaintext_len, mac, AEAD_MAC_SIZE);
++    // increment nonce to avoid reuse
++    nonce_increment(session_nonce);
++    wipe_buf(mac, sizeof(mac));
++    return (int)(plaintext_len + AEAD_MAC_SIZE);
++}
++
++// Decrypt request (in_buf contains [ciphertext][mac]) -> out_plain (must be >= cipher_len)
++// in_len = cipher_len + AEAD_MAC_SIZE. Returns plaintext length or negative on error.
++static int decrypt_request_checked(const uint8_t *in_buf, size_t in_len,
++                                   uint8_t *out_plain, size_t out_plain_len) {
++    if (!in_buf || !out_plain) return -1;
++    if (in_len < AEAD_MAC_SIZE) return -2;
++    size_t cipher_len = in_len - AEAD_MAC_SIZE;
++    if (out_plain_len < cipher_len) return -3;
++    if (!kb_priv_loaded || !peer_pub_present) return -4;
++    const uint8_t *mac = in_buf + cipher_len;
++    // attempt unlock
++    if (crypto_unlock_aead(out_plain, mac, session_key, session_nonce, NULL, 0, in_buf, cipher_len) != 0) {
++        return -5; // MAC fail
++    }
++    // increment nonce to avoid reuse on success
++    nonce_increment(session_nonce);
++    return (int)cipher_len;
++}
++
++// ---------------- initialization flow to call from main ----------------
++// tries to load kb_priv from flash, if not present — generate and store
++static int crypto_init_and_load_keys(void) {
++    // try load
++    if (load_kb_priv_from_flash() == 0) {
++        // loaded OK
++        kb_priv_loaded = true;
++    } else {
++        // generate new keypair and store
++        if (platform_hw_random(kb_priv, KX_PRIV_SIZE) != 0) return -1;
++        crypto_x25519_public_key(kb_pub, kb_priv);
++        // store
++        if (store_kb_priv_to_flash() != 0) {
++            // best-effort: wipe private and return error
++            wipe_buf(kb_priv, sizeof(kb_priv));
++            wipe_buf(kb_pub, sizeof(kb_pub));
++            return -2;
++        }
++        kb_priv_loaded = true;
++    }
++    // try load peer pub (optional)
++    (void)load_peer_pub_from_flash();
++    return 0;
++}
++
++/* End of crypto/storage additions */
