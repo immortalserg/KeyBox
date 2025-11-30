@@ -1,4 +1,4 @@
-* СТРУКТУРА МОДУЛЯ
+# СТРУКТУРА МОДУЛЯ
 ```
 crypto/
 │
@@ -30,7 +30,7 @@ crypto/
 ├── crypto_session.h
 ```
 
-* Сгенерировать session key:
+# Сгенерировать session key:
 ```
 crypto_session_derive(
     x25519_self_private,
@@ -38,12 +38,12 @@ crypto_session_derive(
     session_key   // 32 bytes
 );
 ```
-* Зашифровать:
+# Зашифровать:
 ```
 crypto_aead_encrypt(session_key, nonce, aad, aad_len, plaintext, pt_len,
                     ciphertext, tag);
 ```
-* Расшифровать:
+# Расшифровать:
 ```
 if (!crypto_aead_decrypt(session_key, nonce, aad, aad_len,
                          ciphertext, ct_len, tag, plaintext_out)) {
@@ -51,9 +51,10 @@ if (!crypto_aead_decrypt(session_key, nonce, aad, aad_len,
 }
 ```
 
-* МОДУЛЬ №1 — Ed25519 → X25519
-* МОДУЛЬ №2 — Curve25519 (X25519)
-* МОДУЛЬ №3 — SHA-256
+# МОДУЛЬ №1 — Ed25519 → X25519
+# МОДУЛЬ №2 — Curve25519 (X25519)
+# МОДУЛЬ №3 — SHA-256
+
 Этот SHA-256 будет использоваться:
 
 для HMAC-SHA256
